@@ -1,0 +1,6 @@
+{
+  "file_path": "./exampleFile.txt",
+  "server_url": "http://localhost:5000",
+  "interval_minutes": 60,
+  "max_files": 5
+}
