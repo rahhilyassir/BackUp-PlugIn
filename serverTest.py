@@ -1,57 +1,99 @@
-from flask import Flask, request, jsonify
-import os
-from datetime import datetime
-import json
+"""
+Self-test suite for the backup server.
 
-app = Flask(__name__)
+Run it with::
 
-UPLOAD_FOLDER = 'uploads'
-MAX_FILES = None
+    python serverTest.py
 
-def load_config():
-    """
-    Loads the configuration from a JSON file.
-    """
-    with open('config.json', 'r') as file:
-        config = json.load(file)
-    return config
+The tests use Flask's built-in test client and a temporary upload folder, so
+no running server, network connection, or real backups are required.
+"""
 
-def get_timestamped_filename(filename):
-    base, ext = os.path.splitext(filename)
-    timestamp = datetime.now().strftime("%d-%m-%y_%H-%M-%S")
-    return f"{base}_{timestamp}{ext}"
+from __future__ import annotations
 
-def manage_files():
-    files = sorted(os.listdir(UPLOAD_FOLDER), key=lambda x: os.path.getctime(os.path.join(UPLOAD_FOLDER, x)))
-    if MAX_FILES is not None and len(files) >= MAX_FILES:
-        os.remove(os.path.join(UPLOAD_FOLDER, files[0]))
+import io
+import tempfile
+import unittest
+from pathlib import Path
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part in the request"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No file selected for uploading"}), 400
+from server import create_app
 
-    # Ensure the uploads directory exists
-    if not os.path.exists(UPLOAD_FOLDER):
-        os.makedirs(UPLOAD_FOLDER)
 
-    # Load configuration
-    global MAX_FILES
-    config = load_config()
-    MAX_FILES = config.get('max_files', None)
+class BackupServerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.upload_folder = Path(self.temp_dir.name) / "uploads"
+        self.app = create_app(
+            {
+                "UPLOAD_FOLDER": str(self.upload_folder),
+                "MAX_FILES": 2,
+            }
+        )
+        self.app.config.update(TESTING=True)
+        self.client = self.app.test_client()
 
-    # Manage the files to ensure we only keep the last 'MAX_FILES' uploads
-    manage_files()
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
 
-    # Save the new file with a timestamped filename
-    timestamped_filename = get_timestamped_filename(file.filename)
-    file_path = os.path.join(UPLOAD_FOLDER, timestamped_filename)
-    file.save(file_path)
+    def upload(self, content: bytes = b"hello", filename: str = "exampleFile.txt"):
+        return self.client.post(
+            "/upload",
+            data={"file": (io.BytesIO(content), filename)},
+            content_type="multipart/form-data",
+        )
 
-    return jsonify({"message": "File successfully uploaded", "filename": timestamped_filename}), 201
+    def test_health_endpoint(self) -> None:
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "ok")
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    def test_upload_saves_file(self) -> None:
+        response = self.upload(b"hello backup")
+        self.assertEqual(response.status_code, 201)
+
+        body = response.get_json()
+        self.assertIn("filename", body)
+        self.assertTrue(body["filename"].startswith("exampleFile_"))
+        self.assertTrue(body["filename"].endswith(".txt"))
+        self.assertEqual(body["size"], len(b"hello backup"))
+
+        saved_file = self.upload_folder / body["filename"]
+        self.assertTrue(saved_file.is_file())
+        self.assertEqual(saved_file.read_bytes(), b"hello backup")
+
+    def test_upload_creates_upload_folder(self) -> None:
+        self.assertTrue(self.upload_folder.is_dir())
+
+    def test_upload_without_file_is_rejected(self) -> None:
+        response = self.client.post("/upload", data={}, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("error", response.get_json())
+
+    def test_upload_with_empty_filename_is_rejected(self) -> None:
+        response = self.upload(b"", filename="")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("error", response.get_json())
+
+    def test_retention_keeps_only_max_files(self) -> None:
+        for index in range(3):
+            response = self.upload(f"content-{index}".encode(), f"backup-{index}.txt")
+            self.assertEqual(response.status_code, 201)
+
+        saved_files = [entry for entry in self.upload_folder.iterdir() if entry.is_file()]
+        self.assertEqual(len(saved_files), 2)
+
+    def test_original_filename_is_sanitized(self) -> None:
+        response = self.upload(b"malicious", "../../escape.txt")
+        self.assertEqual(response.status_code, 201)
+
+        saved_name = response.get_json()["filename"]
+        self.assertNotIn("/", saved_name)
+        self.assertNotIn("\\", saved_name)
+
+        saved_path = (self.upload_folder / saved_name).resolve()
+        self.assertEqual(saved_path.parent, self.upload_folder.resolve())
+        self.assertFalse((Path(self.temp_dir.name) / "escape.txt").exists())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

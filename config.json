@@ -1,6 +1,14 @@
 {
   "file_path": "./exampleFile.txt",
-  "server_url": "http://localhost:5000",
+  "server_url": "http://127.0.0.1:5000",
   "interval_minutes": 60,
-  "max_files": 5
+  "run_on_start": true,
+  "request_timeout_seconds": 30,
+  "log_file": "backup.log",
+  "max_files": 5,
+  "upload_folder": "uploads",
+  "host": "127.0.0.1",
+  "port": 5000,
+  "debug": false,
+  "max_upload_mb": null
 }
